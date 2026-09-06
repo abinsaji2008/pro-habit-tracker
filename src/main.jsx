@@ -20,6 +20,24 @@ const duration = m => { const h=Math.floor(m/60), r=m%60; return h ? `${h}h${r ?
 const dayIndex = d => d.getDay() === 0 ? 6 : d.getDay()-1;
 const dateKey = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const clone = x => JSON.parse(JSON.stringify(x));
+const CALENDAR_TOKEN_KEY = 'dayforge_google_calendar_token';
+
+function loadStoredCalendarToken() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CALENDAR_TOKEN_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (!saved?.accessToken || !saved?.expiresAt || Date.now() >= saved.expiresAt - 30000) {
+      localStorage.removeItem(CALENDAR_TOKEN_KEY);
+      return null;
+    }
+    return saved.accessToken;
+  } catch (_) {
+    localStorage.removeItem(CALENDAR_TOKEN_KEY);
+    return null;
+  }
+}
 
 function loadScript(src) {
   return new Promise((resolve,reject) => {
@@ -31,11 +49,13 @@ function loadScript(src) {
 function App(){
   const configured = !!firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).includes('YOUR_');
   const [fb,setFb] = useState(null), [user,setUser] = useState(null);
+  const storedToken = loadStoredCalendarToken();
+  const [token,setToken] = useState(storedToken), [calConnected,setCalConnected] = useState(!!storedToken);
   const [tab,setTab] = useState('today'), [selected,setSelected] = useState(new Date());
   const [blocks,setBlocks] = useState([]), [legacy,setLegacy] = useState(emptyData);
   const [places,setPlaces] = useState(['Study Desk','Bedroom','School','Workshop']);
   const [modal,setModal] = useState(null), [notice,setNotice] = useState('');
-  const [token,setToken] = useState(null), [calConnected,setCalConnected] = useState(false), [calEvents,setCalEvents] = useState([]), [calLoading,setCalLoading] = useState(false);
+  const [calEvents,setCalEvents] = useState([]), [calLoading,setCalLoading] = useState(false);
 
   useEffect(()=>{
     if(!configured) return;
@@ -61,7 +81,7 @@ function App(){
     const p=JSON.parse(localStorage.getItem('dayforge_places')||'null'); if(p) setPlaces(p);
   },[]);
   useEffect(()=>localStorage.setItem('dayforge_places',JSON.stringify(places)),[places]);
-  useEffect(()=>{ if(token) fetchCalendar(token); },[selected]);
+  useEffect(()=>{ if(token) fetchCalendar(token); },[token,selected]);
 
   const key=dateKey(selected), di=dayIndex(selected);
   const todayBlocks=useMemo(()=>blocks.filter(b=>b.active!==false&&b.days?.includes(di)&&!(b.exceptions||[]).includes(key)).sort((a,b)=>a.start.localeCompare(b.start)),[blocks,di,key]);
@@ -101,6 +121,10 @@ function App(){
       await loadScript('https://accounts.google.com/gsi/client');
       const tc=window.google.accounts.oauth2.initTokenClient({client_id:GOOGLE_CLIENT_ID,scope:'https://www.googleapis.com/auth/calendar',callback:async r=>{
         if(r.error){setNotice(r.error);setCalLoading(false);return;}
+        const expiresIn = Number(r.expires_in) || 3600;
+        try {
+          localStorage.setItem(CALENDAR_TOKEN_KEY, JSON.stringify({accessToken:r.access_token,expiresAt:Date.now()+expiresIn*1000}));
+        } catch (_) {}
         setToken(r.access_token);setCalConnected(true);setNotice('Google Calendar connected');
         try{ for(const b of blocks) await syncCalendarBlock(b,r.access_token); await fetchCalendar(r.access_token); } finally { setCalLoading(false); }
       }});
@@ -112,7 +136,9 @@ function App(){
     try{
       const a=new Date(selected);a.setHours(0,0,0,0);const b=new Date(selected);b.setHours(23,59,59,999);
       const url=`https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(a.toISOString())}&timeMax=${encodeURIComponent(b.toISOString())}&showDeleted=false`;
-      const r=await fetch(url,{headers:{Authorization:`Bearer ${t}`}}); if(!r.ok) throw new Error('Could not read Google Calendar.');
+      const r=await fetch(url,{headers:{Authorization:`Bearer ${t}`}}); 
+      if(r.status===401){localStorage.removeItem(CALENDAR_TOKEN_KEY);setToken(null);setCalConnected(false);setCalEvents([]);setNotice('Google Calendar authorization expired. Please reconnect once.');return;}
+      if(!r.ok) throw new Error('Could not read Google Calendar.');
       const j=await r.json();setCalEvents((j.items||[]).filter(e=>e.start?.dateTime&&e.end?.dateTime&&e.status!=='cancelled').map(e=>({id:e.id,summary:e.summary||'Calendar event',startMin:new Date(e.start.dateTime).getHours()*60+new Date(e.start.dateTime).getMinutes(),endMin:new Date(e.end.dateTime).getHours()*60+new Date(e.end.dateTime).getMinutes()})));
     }catch(e){setNotice(e.message)}
   }
@@ -144,7 +170,7 @@ function App(){
       .dayforge-timeline .hour{height:80px!important;position:relative}
       .dayforge-timeline .block-card{top:var(--block-top)!important;height:var(--block-height)!important}
       .legacy-panel{padding:16px;margin-top:18px}.legacy-panel .panel-title{display:flex;align-items:center;gap:7px}.legacy-row{display:flex;align-items:center;gap:9px;padding:10px 0;border-top:1px solid #1a2435;font-size:12px}.legacy-row>span{flex:1}.legacy-row small{color:#718098}.done{text-decoration:line-through;color:#718098}.legacy-panel .inputs{display:flex;gap:8px;margin-bottom:5px}.legacy-panel input,.legacy-panel textarea{width:100%;background:#0a101a;border:1px solid #23314a;color:#fff;border-radius:10px;padding:10px;outline:0}.check{border:1px solid #263650;background:#101827;border-radius:8px;min-width:30px;height:30px;color:#aab7c9}.check.done{background:#123126;color:#68e0a4}.danger{border:0;background:transparent;color:#ff8a9d;padding:6px}.exception-row{display:flex;gap:8px}.exception-row input{flex:1}.exception-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.exception-chip{border:1px solid #57303c;background:#24151c;color:#ff9bae;border-radius:8px;padding:6px 8px;font-size:9px;display:inline-flex;gap:5px;align-items:center}
-      @media(max-width:820px){.app-shell{display:block}.sidebar{position:sticky;top:0;z-index:10;height:auto;padding:9px 10px;border-right:0;border-bottom:1px solid var(--line);display:block}.brand{padding:2px 4px 9px}.brand-sub{display:none}.sidebar nav{display:flex;overflow-x:auto;gap:5px}.sidebar nav::-webkit-scrollbar{display:none}.nav{flex:0 0 auto;font-size:11px!important;padding:9px 10px}.sidebar-bottom{display:none}.main{padding:16px 10px 35px}.topbar{align-items:flex-start;gap:10px}.topbar h1{font-size:24px}.top-actions .ghost{display:none}.content-grid{display:block}.hero-card{padding:12px}.stat-big{font-size:36px}.spark{display:none}.timeline.dayforge-timeline{height:1020px!important}.dayforge-timeline .hour{height:60px!important}.dayforge-timeline .block-card{left:65px!important;right:6px!important}.side-stack{margin-top:12px}.week-grid{display:flex;overflow-x:auto;scroll-snap-type:x mandatory}.day-col{min-width:235px;scroll-snap-align:start}.places-grid{display:block}.place-list{margin-top:12px}.place-cards{grid-template-columns:1fr}.modal-backdrop{padding:8px}.modal{max-height:94vh;overflow:auto}.form{padding:15px}.day-row{flex-wrap:wrap}.toast{left:10px;right:10px;top:10px}.legacy-panel .inputs{flex-direction:column}.legacy-panel .inputs .primary{width:100%}}
+      @media(max-width:820px){.app-shell{display:block}.sidebar{position:sticky;top:0;z-index:10;height:auto;padding:9px 10px;border-right:0;border-bottom:1px solid var(--line);display:block}.brand{padding:2px 4px 9px}.brand-sub{display:none}.sidebar nav{display:flex;overflow-x:auto;gap:5px}.sidebar nav::-webkit-scrollbar{display:none}.nav{flex:0 0 auto;font-size:11px!important;padding:9px 10px}.sidebar-bottom{display:none}.main{padding:16px 10px 35px}.topbar{align-items:flex-start;gap:10px}.topbar h1{font-size:24px}.top-actions .ghost{display:none}.content-grid{display:block}.hero-card{padding:12px}.stat-big{font-size:36px}.spark{display:none}.timeline.dayforge-timeline{height:1020px!important}.dayforge-timeline .hour{height:60px!important}.dayforge-timeline .block-card{left:65px!important;right:6px!important}.side-stack{margin-top:12px}.week-grid{display:flex;overflow-x:auto;scroll-snap-type:x mandatory}.day-col{min-width:235px;scroll-snap-align:start}.places-grid{display:block}.place-list{margin-top:12px}.place-cards{grid-template-columns:1fr}.modal-backdrop{padding:8px}.modal{max-height:94vh;overflow:auto}.form{padding:15px}.day-row{flex-wrap:wrap}.toast{left:10px;right:10px}.legacy-panel .inputs{flex-direction:column}.legacy-panel .inputs .primary{width:100%}}
       @media(max-width:430px){.topbar h1{font-size:21px}.timeline.dayforge-timeline{height:900px!important}.dayforge-timeline .hour{height:53px!important}.dayforge-timeline .block-card{left:58px!important}.place-hero,.place-list,.settings-card,.week-panel{padding:14px}}
     `}</style>
     <div className="app-shell">
@@ -205,7 +231,7 @@ function Week({blocks,selected,edit}){
 
 function Places({places,add}){const[v,setV]=useState('');return <div className="places-grid"><div className="panel place-hero"><div className="stat-kicker">QUICK LOCATION PICKER</div><h2>Use places as cues.</h2><p>Save common places so the same location takes one tap when you build a block.</p><div className="place-input"><MapPin size={17}/><input value={v} onChange={e=>setV(e.target.value)} placeholder="Add custom place…"/><button onClick={()=>{if(v.trim()){add(v.trim());setV('')}}}><Plus size={16}/></button></div></div><div className="panel place-list"><div className="panel-title"><span>Recent & common places</span><span className="muted">{places.length} saved</span></div><div className="place-cards">{places.map((p,i)=>{const C=COMMON_PLACES.find(x=>x[0]===p)?.[1]||MapPin;return <div className="place-card" key={p}><div className="place-icon"><C size={17}/></div><div><strong>{p}</strong><span>{i<4?'Quick pick':'Custom place'}</span></div></div>})}</div></div></div>}
 
-function Settings({configured,connected,connect}){return <div className="settings-wrap"><div className="panel settings-card"><div className="settings-title"><Settings2/><div><div className="stat-kicker">BACKEND & SYNC</div><h2>Connections</h2></div></div><div className="setting-row"><div><strong>Firebase</strong><span>{configured?'Authentication + Firestore + Realtime Database ready':'Firebase configuration missing'}</span></div><span className={`status ${configured?'ok':''}`}>{configured?'READY':'SETUP'}</span></div><div className="setting-row"><div><strong>Google Calendar</strong><span>{connected?'OAuth access active for this browser session':'Connect to import events and synchronize schedule blocks'}</span></div><button className="outline" onClick={connect}>{connected?'Reconnect':'Connect Google Calendar'}</button></div><div className="security-note"><ShieldCheck size={18}/><div><strong>Private data</strong><p>Your Firebase rules should keep each user under users/{'{uid}'}. Calendar OAuth tokens stay in browser memory in this version.</p></div></div><div className="setup-links"><span><ExternalLink size={14}/>Enable Google Calendar API</span><span><ExternalLink size={14}/>Configure OAuth origin in Google Cloud</span><span><ExternalLink size={14}/>Check Firebase Authentication</span></div></div></div>}
+function Settings({configured,connected,connect}){return <div className="settings-wrap"><div className="panel settings-card"><div className="settings-title"><Settings2/><div><div className="stat-kicker">BACKEND & SYNC</div><h2>Connections</h2></div></div><div className="setting-row"><div><strong>Firebase</strong><span>{configured?'Authentication + Firestore + Realtime Database ready':'Firebase configuration missing'}</span></div><span className={`status ${configured?'ok':''}`}>{configured?'READY':'SETUP'}</span></div><div className="setting-row"><div><strong>Google Calendar</strong><span>{connected?'OAuth access active for this browser session':'Connect to import events and synchronize schedule blocks'}</span></div><button className="outline" onClick={connect}>{connected?'Reconnect':'Connect Google Calendar'}</button></div><div className="security-note"><ShieldCheck size={18}/><div><strong>Private data</strong><p>Your Firebase rules should keep each user under users/{'{uid}'}. The short-lived Calendar OAuth token is kept in this browser for reload persistence and is never written to Firebase.</p></div></div><div className="setup-links"><span><ExternalLink size={14}/>Enable Google Calendar API</span><span><ExternalLink size={14}/>Configure OAuth origin in Google Cloud</span><span><ExternalLink size={14}/>Check Firebase Authentication</span></div></div></div>}
 
 function BlockModal({initial,places,selected,onClose,onSave,onAddPlace}){
   const [f,setF]=useState(initial||{id:crypto.randomUUID(),title:'',type:'study',start:'16:30',end:'17:30',place:places[0]||'Study Desk',days:[0,1,2,3,4],color:'cyan',active:true,exceptions:[]});
